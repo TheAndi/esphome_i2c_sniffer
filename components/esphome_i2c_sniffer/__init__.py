@@ -28,13 +28,13 @@ async def to_code(config):
     await cg.register_component(var, config)
 
     if CONF_MSG_SENSOR in config:
-        sens = await text_sensor.new_text_sensor(config[CONF_MSG_SENSOR])
+        sens = await text_sensor.new_text_sensor(config[CONF_MSG_SENSOR], var)
         cg.add(var.register_msg_sensor(sens))
 
     if CONF_LAST_ADDRESS_SENSOR in config:
-        addr = await sensor.new_sensor(config[CONF_LAST_ADDRESS_SENSOR])
+        addr = await sensor.new_sensor(config[CONF_LAST_ADDRESS_SENSOR], var)
         cg.add(var.register_addr_sensor(addr))
 
     if CONF_LAST_DATA_SENSOR in config:
-        data = await sensor.new_sensor(config[CONF_LAST_DATA_SENSOR])
+        data = await sensor.new_sensor(config[CONF_LAST_DATA_SENSOR], var)
         cg.add(var.register_data_sensor(data))
