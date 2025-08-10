@@ -39,8 +39,12 @@ async def to_code(config):
     await cg.register_component(var, config)
 
     if CONF_MSG_SENSOR in config:
+        if not isinstance(config[CONF_MSG_SENSOR], dict):
+            raise RuntimeError(
+                f"msg_sensor has wrong type {type(config[CONF_MSG_SENSOR])!r}: {config[CONF_MSG_SENSOR]!r}")
         sens = await text_sensor.new_text_sensor(config[CONF_MSG_SENSOR])
         cg.add(var.register_msg_sensor(sens))
+
 
     if CONF_LAST_ADDRESS_SENSOR in config:
         addr = await sensor.new_sensor(config[CONF_LAST_ADDRESS_SENSOR])
