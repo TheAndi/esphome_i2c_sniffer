@@ -16,9 +16,9 @@ CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(EsphomeI2cSniffer),
     cv.Required(CONF_SDA_PIN): cv.int_,
     cv.Required(CONF_SCL_PIN): cv.int_,
-    cv.Optional(CONF_MSG_SENSOR): text_sensor.TEXT_SENSOR_SCHEMA,
-    cv.Optional(CONF_LAST_ADDRESS_SENSOR): sensor.SENSOR_SCHEMA,
-    cv.Optional(CONF_LAST_DATA_SENSOR): sensor.SENSOR_SCHEMA,
+    cv.Optional(CONF_MSG_SENSOR): text_sensor.text_sensor_schema(CONF_MSG_SENSOR),
+    cv.Optional(CONF_LAST_ADDRESS_SENSOR): sensor.sensor_schema(CONF_LAST_ADDRESS_SENSOR),
+    cv.Optional(CONF_LAST_DATA_SENSOR): sensor.sensor_schema(CONF_LAST_DATA_SENSOR),
 }).extend(cv.COMPONENT_SCHEMA)
 
 async def to_code(config):
