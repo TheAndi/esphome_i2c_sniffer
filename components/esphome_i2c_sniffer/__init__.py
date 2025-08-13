@@ -3,6 +3,9 @@ import esphome.config_validation as cv
 from esphome.components import text_sensor, sensor
 from esphome.const import CONF_ID
 
+# Stellt sicher, dass die zugehörigen C++-Teile eingebunden werden
+AUTO_LOAD = ["sensor", "text_sensor"]
+
 ns = cg.esphome_ns.namespace("esphome_i2c_sniffer")
 EsphomeI2cSniffer = ns.class_("EsphomeI2cSniffer", cg.Component)
 
