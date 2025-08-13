@@ -1,3 +1,4 @@
+#include "Arduino.h"  // stellt attachInterruptArg & pinMode bereit
 #include "esphome_i2c_sniffer.h"
 #include "esphome/core/log.h"
 #include <cstdio>
@@ -7,7 +8,6 @@ namespace esphome_i2c_sniffer {
 
 static const char *const TAG = "i2c_sniffer";
 
-// Free-function ISR trampolines (attachInterruptArg requires this signature)
 static void IRAM_ATTR scl_isr(void *arg) {
   reinterpret_cast<EsphomeI2cSniffer *>(arg)->on_scl_edge_();
 }
@@ -16,14 +16,12 @@ static void IRAM_ATTR sda_isr(void *arg) {
 }
 
 void EsphomeI2cSniffer::setup() {
-  // Configure inputs with pullups (I2C lines idle HIGH)
   pinMode(this->scl_pin_, INPUT_PULLUP);
   pinMode(this->sda_pin_, INPUT_PULLUP);
 
   this->last_scl_ = digitalRead(this->scl_pin_);
   this->last_sda_ = digitalRead(this->sda_pin_);
 
-  // Attach pin-change interrupts for both lines
   attachInterruptArg(this->scl_pin_, scl_isr, this, CHANGE);
   attachInterruptArg(this->sda_pin_, sda_isr, this, CHANGE);
 
@@ -40,17 +38,14 @@ void IRAM_ATTR EsphomeI2cSniffer::on_sda_edge_() {
   bool sda = digitalRead(this->sda_pin_);
   bool scl = digitalRead(this->scl_pin_);
 
-  // START: SDA falls while SCL high
-  if (!sda && this->last_sda_ && scl) {
+  if (!sda && this->last_sda_ && scl) {  // START
     this->in_transfer_ = true;
     this->bit_idx_ = 0;
     this->ack_phase_ = false;
     this->cur_byte_ = 0;
     this->have_addr_ = false;
     this->data_len_ = 0;
-  }
-  // STOP: SDA rises while SCL high
-  else if (sda && !this->last_sda_ && scl) {
+  } else if (sda && !this->last_sda_ && scl) {  // STOP
     if (this->in_transfer_) {
       this->in_transfer_ = false;
       this->frame_ready_ = true;
@@ -67,10 +62,8 @@ void IRAM_ATTR EsphomeI2cSniffer::on_scl_edge_() {
   }
 
   bool scl = digitalRead(this->scl_pin_);
-  // Sample data on SCL rising edge
-  if (scl) {
+  if (scl) {  // Sample auf steigender SCL-Flanke
     if (this->ack_phase_) {
-      // ignore ACK/NACK bit, just move to next byte
       this->ack_phase_ = false;
       this->bit_idx_ = 0;
       this->cur_byte_ = 0;
@@ -82,12 +75,10 @@ void IRAM_ATTR EsphomeI2cSniffer::on_scl_edge_() {
     this->bit_idx_++;
 
     if (this->bit_idx_ >= 8) {
-      // Next bit is the ACK phase
       this->ack_phase_ = true;
       this->bit_idx_ = 0;
 
       if (!this->have_addr_) {
-        // First byte is address + R/W bit
         this->addr_ = (this->cur_byte_ >> 1) & 0x7F;
         this->rw_ = (this->cur_byte_ & 0x01) != 0;
         this->have_addr_ = true;
@@ -104,7 +95,6 @@ void IRAM_ATTR EsphomeI2cSniffer::on_scl_edge_() {
 }
 
 void EsphomeI2cSniffer::publish_frame_() {
-  // Build human-readable string like: "ADDR 0x3C W DATA: 00 23 ..."
   char buf[16];
   std::string out;
   snprintf(buf, sizeof(buf), "ADDR 0x%02X %c", this->addr_, this->rw_ ? 'R' : 'W');
@@ -133,14 +123,12 @@ void EsphomeI2cSniffer::publish_frame_() {
 }
 
 void EsphomeI2cSniffer::loop() {
-  // Atomic copy of frame_ready_ and buffer snapshot
   if (!this->frame_ready_)
     return;
 
   noInterrupts();
   bool ready = this->frame_ready_;
   this->frame_ready_ = false;
-  // Nothing else to copy; fields are read in publish_frame_ directly after interrupts restored.
   interrupts();
 
   if (ready)
