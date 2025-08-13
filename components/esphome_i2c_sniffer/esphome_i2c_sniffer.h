@@ -1,9 +1,7 @@
 #pragma once
 
-#include <vector>
 #include <string>
 #include "esphome/core/component.h"
-#include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/sensor/sensor.h"
@@ -24,18 +22,23 @@ class EsphomeI2cSniffer : public Component {
   void loop() override;
   void dump_config() override;
 
- protected:
-  void IRAM_ATTR on_scl_edge_();
-  void IRAM_ATTR on_sda_edge_();
-  void publish_frame_();
+  // Von ISR-Wrappern aufgerufen -> öffentlich
+  void on_scl_edge_();
+  void on_sda_edge_();
 
+ protected:
+  void publish_frame_(uint8_t addr, bool rw, const uint8_t *data, uint8_t len);
+
+  // Pins
   uint8_t sda_pin_{255};
   uint8_t scl_pin_{255};
 
+  // Entities
   text_sensor::TextSensor *msg_sensor_{nullptr};
   sensor::Sensor *last_addr_sensor_{nullptr};
   sensor::Sensor *last_data_sensor_{nullptr};
 
+  // Laufzeit-State (von ISR verändert)
   volatile bool in_transfer_{false};
   volatile bool last_sda_{true};
   volatile bool last_scl_{true};
@@ -47,7 +50,9 @@ class EsphomeI2cSniffer : public Component {
   volatile bool have_addr_{false};
   volatile uint8_t addr_{0};
   volatile bool rw_{false};
-  uint8_t data_[64];
+
+  static constexpr uint8_t MAX_DATA_ = 64;
+  uint8_t data_[MAX_DATA_]{};
   volatile uint8_t data_len_{0};
 
   volatile bool frame_ready_{false};
