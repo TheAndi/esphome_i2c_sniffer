@@ -1,114 +1,150 @@
 #include "esphome_i2c_sniffer.h"
 #include "esphome/core/log.h"
+#include <cstdio>
 
 namespace esphome {
 namespace esphome_i2c_sniffer {
 
-volatile EsphomeI2cSniffer::Block EsphomeI2cSniffer::blocks_[MAX_BLOCKS];
-volatile uint8_t EsphomeI2cSniffer::block_count_ = 0;
-volatile bool EsphomeI2cSniffer::tr_ready_ = false;
-volatile uint8_t EsphomeI2cSniffer::bit_count_ = 0;
-volatile uint8_t EsphomeI2cSniffer::byte_count_ = 0;
-volatile uint8_t EsphomeI2cSniffer::data_byte_ = 0;
-volatile bool EsphomeI2cSniffer::in_transfer_ = false;
+static const char *const TAG = "i2c_sniffer";
+
+// Free-function ISR trampolines (attachInterruptArg requires this signature)
+static void IRAM_ATTR scl_isr(void *arg) {
+  reinterpret_cast<EsphomeI2cSniffer *>(arg)->on_scl_edge_();
+}
+static void IRAM_ATTR sda_isr(void *arg) {
+  reinterpret_cast<EsphomeI2cSniffer *>(arg)->on_sda_edge_();
+}
 
 void EsphomeI2cSniffer::setup() {
-  pinMode(scl_pin_, INPUT_PULLUP);
-  pinMode(sda_pin_, INPUT_PULLUP);
-  block_count_ = 0; bit_count_ = 0; byte_count_ = 0; data_byte_ = 0;
-  in_transfer_ = false; tr_ready_ = false;
-  attachInterrupt(digitalPinToInterrupt(scl_pin_), on_scl, RISING);
-  attachInterrupt(digitalPinToInterrupt(sda_pin_), on_sda, CHANGE);
+  // Configure inputs with pullups (I2C lines idle HIGH)
+  pinMode(this->scl_pin_, INPUT_PULLUP);
+  pinMode(this->sda_pin_, INPUT_PULLUP);
+
+  this->last_scl_ = digitalRead(this->scl_pin_);
+  this->last_sda_ = digitalRead(this->sda_pin_);
+
+  // Attach pin-change interrupts for both lines
+  attachInterruptArg(this->scl_pin_, scl_isr, this, CHANGE);
+  attachInterruptArg(this->sda_pin_, sda_isr, this, CHANGE);
+
+  ESP_LOGI(TAG, "I2C sniffer on SDA=%u, SCL=%u", this->sda_pin_, this->scl_pin_);
+}
+
+void EsphomeI2cSniffer::dump_config() {
+  ESP_LOGCONFIG(TAG, "I2C Sniffer:");
+  ESP_LOGCONFIG(TAG, "  SDA Pin: %u", this->sda_pin_);
+  ESP_LOGCONFIG(TAG, "  SCL Pin: %u", this->scl_pin_);
+}
+
+void IRAM_ATTR EsphomeI2cSniffer::on_sda_edge_() {
+  bool sda = digitalRead(this->sda_pin_);
+  bool scl = digitalRead(this->scl_pin_);
+
+  // START: SDA falls while SCL high
+  if (!sda && this->last_sda_ && scl) {
+    this->in_transfer_ = true;
+    this->bit_idx_ = 0;
+    this->ack_phase_ = false;
+    this->cur_byte_ = 0;
+    this->have_addr_ = false;
+    this->data_len_ = 0;
+  }
+  // STOP: SDA rises while SCL high
+  else if (sda && !this->last_sda_ && scl) {
+    if (this->in_transfer_) {
+      this->in_transfer_ = false;
+      this->frame_ready_ = true;
+    }
+  }
+
+  this->last_sda_ = sda;
+}
+
+void IRAM_ATTR EsphomeI2cSniffer::on_scl_edge_() {
+  if (!this->in_transfer_) {
+    this->last_scl_ = digitalRead(this->scl_pin_);
+    return;
+  }
+
+  bool scl = digitalRead(this->scl_pin_);
+  // Sample data on SCL rising edge
+  if (scl) {
+    if (this->ack_phase_) {
+      // ignore ACK/NACK bit, just move to next byte
+      this->ack_phase_ = false;
+      this->bit_idx_ = 0;
+      this->cur_byte_ = 0;
+      return;
+    }
+
+    bool sda = digitalRead(this->sda_pin_);
+    this->cur_byte_ = (this->cur_byte_ << 1) | (sda ? 1 : 0);
+    this->bit_idx_++;
+
+    if (this->bit_idx_ >= 8) {
+      // Next bit is the ACK phase
+      this->ack_phase_ = true;
+      this->bit_idx_ = 0;
+
+      if (!this->have_addr_) {
+        // First byte is address + R/W bit
+        this->addr_ = (this->cur_byte_ >> 1) & 0x7F;
+        this->rw_ = (this->cur_byte_ & 0x01) != 0;
+        this->have_addr_ = true;
+      } else {
+        if (this->data_len_ < sizeof(this->data_)) {
+          this->data_[this->data_len_++] = this->cur_byte_;
+        }
+      }
+      this->cur_byte_ = 0;
+    }
+  }
+
+  this->last_scl_ = scl;
+}
+
+void EsphomeI2cSniffer::publish_frame_() {
+  // Build human-readable string like: "ADDR 0x3C W DATA: 00 23 ..."
+  char buf[16];
+  std::string out;
+  snprintf(buf, sizeof(buf), "ADDR 0x%02X %c", this->addr_, this->rw_ ? 'R' : 'W');
+  out += buf;
+
+  if (this->data_len_ > 0) {
+    out += " DATA:";
+    for (uint8_t i = 0; i < this->data_len_; i++) {
+      snprintf(buf, sizeof(buf), " %02X", this->data_[i]);
+      out += buf;
+    }
+  }
+
+  if (this->msg_sensor_ != nullptr)
+    this->msg_sensor_->publish_state(out);
+
+  if (this->last_addr_sensor_ != nullptr)
+    this->last_addr_sensor_->publish_state(static_cast<float>(this->addr_));
+
+  if (this->last_data_sensor_ != nullptr) {
+    uint8_t last = (this->data_len_ > 0) ? this->data_[this->data_len_ - 1] : 0;
+    this->last_data_sensor_->publish_state(static_cast<float>(last));
+  }
+
+  ESP_LOGD(TAG, "%s", out.c_str());
 }
 
 void EsphomeI2cSniffer::loop() {
-  if (tr_ready_) {
-    publish_blocks_();
-  }
-}
+  // Atomic copy of frame_ready_ and buffer snapshot
+  if (!this->frame_ready_)
+    return;
 
-void EsphomeI2cSniffer::publish_blocks_() {
-  Block local[MAX_BLOCKS];
-  uint8_t count;
   noInterrupts();
-  count = block_count_;
-  for (uint8_t i = 0; i <= count && i < MAX_BLOCKS; i++) {
-    local[i] = blocks_[i];
-  }
-  tr_ready_ = false;
+  bool ready = this->frame_ready_;
+  this->frame_ready_ = false;
+  // Nothing else to copy; fields are read in publish_frame_ directly after interrupts restored.
   interrupts();
 
-  if (local[0].addr == 0) return;
-
-  // Build printable string
-  String out = "[" + String(millis()) + "ms] ";
-  for (uint8_t b = 0; b <= count; b++) {
-    const Block &blk = local[b];
-    if (b) out += " | ";
-    out += "[0x";
-    if (blk.addr < 0x10) out += "0";
-    String hexA = String(blk.addr, HEX); hexA.toUpperCase();
-    out += hexA + "]" + blk.mode + blk.addr_ack;
-    for (uint8_t i = 0; i < blk.data_len; i++) {
-      out += "(";
-      if (blk.data[i] < 0x10) out += "0";
-      String hexD = String(blk.data[i], HEX); hexD.toUpperCase();
-      out += hexD + ")" + blk.data_ack[i];
-    }
-  }
-  ESP_LOGD("i2c_sniffer", "%s", out.c_str());
-  if (msg_sensor_) msg_sensor_->publish_state(out.c_str());
-  if (last_addr_sensor_) last_addr_sensor_->publish_state(local[count].addr);
-  if (last_data_sensor_) {
-    float v = local[count].data_len ? local[count].data[local[count].data_len - 1] : 0.0f;
-    last_data_sensor_->publish_state(v);
-  }
-
-  // Trigger on_address callbacks
-  for (auto *trig : address_triggers_) {
-    std::vector<uint8_t> d(local[count].data, local[count].data + local[count].data_len);
-    trig->trigger_(local[count].addr, d);
-  }
-}
-
-void IRAM_ATTR EsphomeI2cSniffer::on_scl() {
-  if (!in_transfer_) return;
-  bool sda = digitalRead(GPIO_NUM_2);  // replace with sda_pin_ if constant allowed
-  if (bit_count_ < 8) {
-    data_byte_ = (data_byte_ << 1) | sda;
-    bit_count_++;
-  }
-  if (bit_count_ == 8) {
-    char ack = sda ? '-' : '+';
-    Block &blk = blocks_[block_count_];
-    if (byte_count_ == 0) {
-      blk.addr = (data_byte_ >> 1) & 0x7F;
-      blk.mode = (data_byte_ & 1) ? 'R' : 'W';
-      blk.addr_ack = ack;
-      blk.data_len = 0;
-    } else if (blk.data_len < 32) {
-      blk.data[blk.data_len] = data_byte_;
-      blk.data_ack[blk.data_len++] = ack;
-    }
-    byte_count_++; bit_count_ = 0; data_byte_ = 0;
-  }
-}
-
-void IRAM_ATTR EsphomeI2cSniffer::on_sda() {
-  bool sda = digitalRead(sda_pin_), scl = digitalRead(scl_pin_);
-  if (!sda && scl) {
-    // START or repeated START
-    if (in_transfer_ && block_count_ < MAX_BLOCKS - 1) block_count_++;
-    else block_count_ = 0;
-    blocks_[block_count_].addr = 0; blocks_[block_count_].addr_ack = '+';
-    blocks_[block_count_].mode = 'W'; blocks_[block_count_].data_len = 0;
-    bit_count_ = byte_count_ = data_byte_ = 0;
-    in_transfer_ = true;
-  } else if (sda && scl && in_transfer_) {
-    // STOP
-    in_transfer_ = false;
-    tr_ready_ = true;
-  }
+  if (ready)
+    this->publish_frame_();
 }
 
 }  // namespace esphome_i2c_sniffer
